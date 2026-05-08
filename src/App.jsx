@@ -12,7 +12,7 @@ function parseM3U(content) {
     logo: '',
     url: '',
     licenseUrl: '',
-    drmScheme: 'com.widevine.alpha'
+    drmScheme: 'com.widevine.alpha' // default Widevine
   };
 
   for (const raw of lines) {
@@ -31,17 +31,21 @@ function parseM3U(content) {
       if (lg) cur.logo = lg[1];
 
     } else if (line.startsWith('#KODIPROP:')) {
+      // Ekstrak lisensi DRM
       const licenseType = line.match(/license_type=([^ ]*)/);
       if (licenseType) cur.drmScheme = licenseType[1];
 
       const licenseKey = line.match(/license_key=([^ ]*)/);
       if (licenseKey) cur.licenseUrl = licenseKey[1];
 
-    } else if (line.startsWith('#')) {
+    } else if (line.startsWith('#') || line.startsWith('#')) {
+      // Komentar lain diabaikan
       continue;
     } else {
+      // URL stream
       cur.url = line;
       channels.push({ ...cur });
+      // Reset untuk channel berikutnya
       cur = {
         name: '', group: '', logo: '', url: '',
         licenseUrl: '', drmScheme: 'com.widevine.alpha'
@@ -63,21 +67,26 @@ function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [playerError, setPlayerError] = useState(null);
 
+  // Form single
   const [fName, setFName] = useState('');
   const [fGroup, setFGroup] = useState('');
   const [fLogo, setFLogo] = useState('');
   const [fUrl, setFUrl] = useState('');
 
+  // Import M3U
   const [m3u, setM3u] = useState('');
   const fileRef = useRef(null);
 
+  // Player
   const videoRef = useRef(null);
-  const playerRef = useRef(null); // Shaka.Player instance
+  const playerRef = useRef(null);
 
+  /* Simpan ke localStorage */
   useEffect(() => {
     localStorage.setItem('gravity_channels', JSON.stringify(channels));
   }, [channels]);
 
+  /* Inisialisasi player */
   useEffect(() => {
     if (!currentChannel) return;
     setPlayerError(null);
@@ -90,65 +99,54 @@ function App() {
       playerRef.current.destroy();
       playerRef.current = null;
     }
-    video.removeAttribute('src');
-    video.load();
 
     const url = currentChannel.url;
     const isHLS = url.endsWith('.m3u8') || url.includes('m3u8');
     const hasDRM = !!currentChannel.licenseUrl;
 
-    // JIKA HLS DAN TIDAK ADA DRM → GUNAKAN NATIVE <video>
-    if (isHLS && !hasDRM) {
-      video.src = url;
-      video.play().catch(e => {
-        if (e.name !== 'AbortError') setPlayerError('Cannot play stream.');
-      });
-    }
-    // SELAIN ITU (DRM ATAU BUKAN HLS) → GUNAKAN SHAKA PLAYER
-    else {
+    // Jika ada DRM atau bukan HLS, gunakan Shaka untuk menangani DRM
+    if (hasDRM || !isHLS) {
       shaka.polyfill.installAll();
       if (shaka.Player.isBrowserSupported()) {
         const player = new shaka.Player(video);
         playerRef.current = player;
 
+        // Konfigurasi DRM jika ada
         if (hasDRM) {
           player.configure({
             drm: {
               servers: {
-                [currentChannel.drmScheme || 'com.widevine.alpha']: currentChannel.licenseUrl
+                [currentChannel.drmScheme]: currentChannel.licenseUrl
               }
             }
           });
         }
 
-        player.load(url)
-          .then(() => {
-            video.play().catch(e => {
-              if (e.name !== 'AbortError') setPlayerError('Autoplay blocked.');
-            });
-          })
-          .catch(err => {
-            console.error('Shaka error, fallback native:', err);
-            // Fallback ke native sebagai upaya terakhir
-            video.src = url;
-            video.play().catch(e => setPlayerError('Cannot play stream.'));
-          });
+        player.load(url).catch(err => {
+          console.error('Shaka error, trying native', err);
+          player.destroy();
+          playerRef.current = null;
+          // Fallback native
+          video.src = url;
+          video.play().catch(e => setPlayerError('Cannot play stream.'));
+        });
       } else {
-        // Browser tidak mendukung Shaka → native fallback
         video.src = url;
-        video.play().catch(e => setPlayerError('Cannot play stream.'));
+        video.play().catch(e => setPlayerError('Browser not supported.'));
       }
+    } else {
+      // HLS tanpa DRM, pakai native
+      video.src = url;
+      video.play().catch(err => setPlayerError('Cannot play stream.'));
     }
 
+    // Cleanup saat unmount atau ganti channel
     return () => {
       if (playerRef.current) {
         playerRef.current.destroy();
         playerRef.current = null;
       }
-      if (video) {
-        video.removeAttribute('src');
-        video.load();
-      }
+      video.src = '';
     };
   }, [currentChannel]);
 
@@ -157,6 +155,7 @@ function App() {
     if (window.innerWidth <= 768) setSidebarOpen(false);
   };
 
+  /* Tambah single stream */
   const addSingle = (e) => {
     e.preventDefault();
     if (!fUrl.trim()) return;
