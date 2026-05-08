@@ -1,4 +1,4 @@
-name: Build Android APK (Vite + Capacitor) Patch
+name: Build Android APK  Patch
 
 on:
   push:
