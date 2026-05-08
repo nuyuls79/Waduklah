@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import shaka from 'shaka-player';
-import Hls from 'hls.js'; // <-- Tambahkan hls.js
 import 'shaka-player/dist/controls.css';
 
 /* ==================== PARSER M3U (DENGAN DRM) ==================== */
@@ -73,7 +72,7 @@ function App() {
   const fileRef = useRef(null);
 
   const videoRef = useRef(null);
-  const playerRef = useRef(null);   // Menyimpan instance Hls atau Shaka.Player
+  const playerRef = useRef(null); // Hanya menyimpan instance Shaka.Player
 
   useEffect(() => {
     localStorage.setItem('gravity_channels', JSON.stringify(channels));
@@ -86,98 +85,53 @@ function App() {
     const video = videoRef.current;
     if (!video) return;
 
-    // Hancurkan player sebelumnya (Hls / Shaka / native src)
+    // Hancurkan player sebelumnya (Shaka atau native src)
     if (playerRef.current) {
-      if (playerRef.current.destroy) {
-        playerRef.current.destroy();
-      } else if (playerRef.current.detachMedia) {
-        // Jika instance Hls, lepaskan dari video
-        playerRef.current.detachMedia();
-        playerRef.current.destroy();
-      }
+      playerRef.current.destroy();
       playerRef.current = null;
     }
-    // Kosongkan src native
     video.removeAttribute('src');
     video.load();
 
-    const url = currentChannel.url;
-    const isHLS = url.endsWith('.m3u8') || url.includes('.m3u8');
-    const licenseUrl = currentChannel.licenseUrl;
-
-    // 1. HLS tanpa DRM → hls.js (atau native di Safari)
-    if (isHLS && !licenseUrl) {
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-        });
-        playerRef.current = hls;
-        hls.loadSource(url);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(e => {
-            if (e.name !== 'AbortError') setPlayerError('Autoplay blocked – click play.');
-          });
-        });
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          if (data.fatal) {
-            setPlayerError(`HLS error: ${data.type} – ${data.details}`);
-            hls.destroy();
-            playerRef.current = null;
-          }
-        });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support (Safari)
-        video.src = url;
-        video.play().catch(e => {
-          if (e.name !== 'AbortError') setPlayerError('Cannot play stream.');
-        });
-      } else {
-        setPlayerError('HLS is not supported in this browser.');
-      }
-    }
-    // 2. DRM atau non‑HLS (DASH, dsb) → Shaka Player
-    else {
+    // Gunakan Shaka Player untuk semua stream (HLS/DASH, dengan atau tanpa DRM)
+    if (shaka.Player.isBrowserSupported()) {
       shaka.polyfill.installAll();
-      if (!shaka.Player.isBrowserSupported()) {
-        setPlayerError('Browser does not support Shaka Player.');
-        return;
-      }
 
       const player = new shaka.Player(video);
       playerRef.current = player;
 
+      const licenseUrl = currentChannel.licenseUrl;
       if (licenseUrl) {
         player.configure({
           drm: {
             servers: {
-              [currentChannel.drmScheme || 'com.widevine.alpha']: licenseUrl,
-            },
-          },
+              [currentChannel.drmScheme || 'com.widevine.alpha']: licenseUrl
+            }
+          }
         });
       }
 
-      player.load(url).then(() => {
-        video.play().catch(e => {
-          if (e.name !== 'AbortError') setPlayerError('Autoplay blocked.');
+      player.load(currentChannel.url)
+        .then(() => {
+          video.play().catch(e => {
+            if (e.name !== 'AbortError') setPlayerError('Autoplay blocked. Tap play.');
+          });
+        })
+        .catch(err => {
+          console.error('Shaka error:', err);
+          // Fallback ke native jika Shaka gagal (misal stream sederhana)
+          video.src = currentChannel.url;
+          video.play().catch(e => setPlayerError('Cannot play stream.'));
         });
-      }).catch(err => {
-        console.error('Shaka load error:', err);
-        // Fallback ke native (mungkin MP4 biasa)
-        video.src = url;
-        video.play().catch(e => setPlayerError('Cannot play stream.'));
-      });
+    } else {
+      // Browser tidak mendukung Shaka → native fallback (Safari untuk HLS, dll.)
+      video.src = currentChannel.url;
+      video.play().catch(e => setPlayerError('Cannot play stream.'));
     }
 
     return () => {
       if (playerRef.current) {
-        if (playerRef.current.destroy) {
-          playerRef.current.destroy();
-        } else if (playerRef.current.detachMedia) {
-          playerRef.current.detachMedia();
-          playerRef.current.destroy();
-        }
+        playerRef.current.destroy();
         playerRef.current = null;
       }
       if (video) {
@@ -332,7 +286,7 @@ function App() {
 
         {currentChannel ? (
           <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-            <video ref={videoRef} style={{ width: '100%', height: '100%', background: '#000' }} controls autoPlay playsInline />
+            <video ref={videoRef} style={{ width: '100%', height: '100%', background: '#000' }} controls autoPlay />
             <div className="badge" style={{ position: 'absolute', top: 14, left: 60, zIndex: 10 }}>
               {currentChannel.name}
             </div>
