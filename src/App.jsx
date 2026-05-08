@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import shaka from 'shaka-player';
+import Hls from 'hls.js'; // <-- Tambahkan hls.js
 import 'shaka-player/dist/controls.css';
 
 /* ==================== PARSER M3U (DENGAN DRM) ==================== */
@@ -12,7 +13,7 @@ function parseM3U(content) {
     logo: '',
     url: '',
     licenseUrl: '',
-    drmScheme: 'com.widevine.alpha' // default Widevine
+    drmScheme: 'com.widevine.alpha'
   };
 
   for (const raw of lines) {
@@ -31,21 +32,17 @@ function parseM3U(content) {
       if (lg) cur.logo = lg[1];
 
     } else if (line.startsWith('#KODIPROP:')) {
-      // Ekstrak lisensi DRM
       const licenseType = line.match(/license_type=([^ ]*)/);
       if (licenseType) cur.drmScheme = licenseType[1];
 
       const licenseKey = line.match(/license_key=([^ ]*)/);
       if (licenseKey) cur.licenseUrl = licenseKey[1];
 
-    } else if (line.startsWith('#') || line.startsWith('#')) {
-      // Komentar lain diabaikan
+    } else if (line.startsWith('#')) {
       continue;
     } else {
-      // URL stream
       cur.url = line;
       channels.push({ ...cur });
-      // Reset untuk channel berikutnya
       cur = {
         name: '', group: '', logo: '', url: '',
         licenseUrl: '', drmScheme: 'com.widevine.alpha'
@@ -67,26 +64,21 @@ function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [playerError, setPlayerError] = useState(null);
 
-  // Form single
   const [fName, setFName] = useState('');
   const [fGroup, setFGroup] = useState('');
   const [fLogo, setFLogo] = useState('');
   const [fUrl, setFUrl] = useState('');
 
-  // Import M3U
   const [m3u, setM3u] = useState('');
   const fileRef = useRef(null);
 
-  // Player
   const videoRef = useRef(null);
-  const playerRef = useRef(null);
+  const playerRef = useRef(null);   // Menyimpan instance Hls atau Shaka.Player
 
-  /* Simpan ke localStorage */
   useEffect(() => {
     localStorage.setItem('gravity_channels', JSON.stringify(channels));
   }, [channels]);
 
-  /* Inisialisasi player */
   useEffect(() => {
     if (!currentChannel) return;
     setPlayerError(null);
@@ -94,59 +86,104 @@ function App() {
     const video = videoRef.current;
     if (!video) return;
 
-    // Hentikan player sebelumnya
+    // Hancurkan player sebelumnya (Hls / Shaka / native src)
     if (playerRef.current) {
-      playerRef.current.destroy();
+      if (playerRef.current.destroy) {
+        playerRef.current.destroy();
+      } else if (playerRef.current.detachMedia) {
+        // Jika instance Hls, lepaskan dari video
+        playerRef.current.detachMedia();
+        playerRef.current.destroy();
+      }
       playerRef.current = null;
     }
+    // Kosongkan src native
+    video.removeAttribute('src');
+    video.load();
 
     const url = currentChannel.url;
-    const isHLS = url.endsWith('.m3u8') || url.includes('m3u8');
-    const hasDRM = !!currentChannel.licenseUrl;
+    const isHLS = url.endsWith('.m3u8') || url.includes('.m3u8');
+    const licenseUrl = currentChannel.licenseUrl;
 
-    // Jika ada DRM atau bukan HLS, gunakan Shaka untuk menangani DRM
-    if (hasDRM || !isHLS) {
-      shaka.polyfill.installAll();
-      if (shaka.Player.isBrowserSupported()) {
-        const player = new shaka.Player(video);
-        playerRef.current = player;
-
-        // Konfigurasi DRM jika ada
-        if (hasDRM) {
-          player.configure({
-            drm: {
-              servers: {
-                [currentChannel.drmScheme]: currentChannel.licenseUrl
-              }
-            }
+    // 1. HLS tanpa DRM → hls.js (atau native di Safari)
+    if (isHLS && !licenseUrl) {
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+        });
+        playerRef.current = hls;
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(e => {
+            if (e.name !== 'AbortError') setPlayerError('Autoplay blocked – click play.');
           });
-        }
-
-        player.load(url).catch(err => {
-          console.error('Shaka error, trying native', err);
-          player.destroy();
-          playerRef.current = null;
-          // Fallback native
-          video.src = url;
-          video.play().catch(e => setPlayerError('Cannot play stream.'));
+        });
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            setPlayerError(`HLS error: ${data.type} – ${data.details}`);
+            hls.destroy();
+            playerRef.current = null;
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS support (Safari)
+        video.src = url;
+        video.play().catch(e => {
+          if (e.name !== 'AbortError') setPlayerError('Cannot play stream.');
         });
       } else {
-        video.src = url;
-        video.play().catch(e => setPlayerError('Browser not supported.'));
+        setPlayerError('HLS is not supported in this browser.');
       }
-    } else {
-      // HLS tanpa DRM, pakai native
-      video.src = url;
-      video.play().catch(err => setPlayerError('Cannot play stream.'));
+    }
+    // 2. DRM atau non‑HLS (DASH, dsb) → Shaka Player
+    else {
+      shaka.polyfill.installAll();
+      if (!shaka.Player.isBrowserSupported()) {
+        setPlayerError('Browser does not support Shaka Player.');
+        return;
+      }
+
+      const player = new shaka.Player(video);
+      playerRef.current = player;
+
+      if (licenseUrl) {
+        player.configure({
+          drm: {
+            servers: {
+              [currentChannel.drmScheme || 'com.widevine.alpha']: licenseUrl,
+            },
+          },
+        });
+      }
+
+      player.load(url).then(() => {
+        video.play().catch(e => {
+          if (e.name !== 'AbortError') setPlayerError('Autoplay blocked.');
+        });
+      }).catch(err => {
+        console.error('Shaka load error:', err);
+        // Fallback ke native (mungkin MP4 biasa)
+        video.src = url;
+        video.play().catch(e => setPlayerError('Cannot play stream.'));
+      });
     }
 
-    // Cleanup saat unmount atau ganti channel
     return () => {
       if (playerRef.current) {
-        playerRef.current.destroy();
+        if (playerRef.current.destroy) {
+          playerRef.current.destroy();
+        } else if (playerRef.current.detachMedia) {
+          playerRef.current.detachMedia();
+          playerRef.current.destroy();
+        }
         playerRef.current = null;
       }
-      video.src = '';
+      if (video) {
+        video.removeAttribute('src');
+        video.load();
+      }
     };
   }, [currentChannel]);
 
@@ -155,7 +192,6 @@ function App() {
     if (window.innerWidth <= 768) setSidebarOpen(false);
   };
 
-  /* Tambah single stream */
   const addSingle = (e) => {
     e.preventDefault();
     if (!fUrl.trim()) return;
@@ -296,7 +332,7 @@ function App() {
 
         {currentChannel ? (
           <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-            <video ref={videoRef} style={{ width: '100%', height: '100%', background: '#000' }} controls autoPlay />
+            <video ref={videoRef} style={{ width: '100%', height: '100%', background: '#000' }} controls autoPlay playsInline />
             <div className="badge" style={{ position: 'absolute', top: 14, left: 60, zIndex: 10 }}>
               {currentChannel.name}
             </div>
