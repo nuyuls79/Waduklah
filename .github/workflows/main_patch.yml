@@ -1,4 +1,4 @@
-name: Build Android APK  Patch
+name: Build Android APK Patch
 
 on:
   push:
@@ -79,14 +79,37 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease
 
+      - name: 🔑 Generate signing keystore (sementara)
+        run: |
+          keytool -genkey -v \
+            -keystore gravity-release.keystore \
+            -alias gravity \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Gravity, OU=Dev, O=Gravity, L=City, S=State, C=ID"
+
+      - name: ✍️ Sign APK dengan apksigner
+        run: |
+          # Temukan versi build-tools yang tersedia (pakai yang terbaru)
+          BUILD_TOOLS_VERSION=$(ls $ANDROID_SDK_ROOT/build-tools/ | sort -V | tail -1)
+          $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner sign \
+            --ks gravity-release.keystore \
+            --ks-pass pass:android \
+            --ks-key-alias gravity \
+            --out android/app/build/outputs/apk/release/app-release-signed.apk \
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
+
       - name: 🔍 Cek folder output APK
         if: always()
         run: |
           echo "=== Isi folder apk ==="
           find android/app/build/outputs/apk -type f || echo "Folder tidak ditemukan"
 
-      - name: 📤 Upload APK (semua varian)
+      - name: 📤 Upload APK (signed)
         uses: actions/upload-artifact@v4
         with:
-          name: gravity-app-release
-          path: android/app/build/outputs/apk/**/*.apk
+          name: gravity-app-release-signed
+          path: android/app/build/outputs/apk/release/app-release-signed.apk
